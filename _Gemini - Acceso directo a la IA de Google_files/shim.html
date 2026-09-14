@@ -2510,7 +2510,7 @@ url:e,reason:"blocked_domain_not_allowlisted"},b.parentOrigin);throw new DOMExce
               </div>
               <div>
                 <h4 class="font-bold text-slate-800 text-xs">Cargar Archivo Excel (.xlsx, .xls o .csv)</h4>
-                <p class="text-[11px] text-slate-500">Columnas: <strong class="text-slate-700 font-mono">AGENCIA</strong>, <strong class="text-slate-700 font-mono">RECLAMOS</strong> y opcionales <strong class="text-slate-700 font-mono">P1, P2, P3, P4</strong> (Matriz v2)</p>
+                <p class="text-[11px] text-slate-500">Formatos aceptados: <strong class="text-slate-700 font-mono">AGENCIA, RECLAMOS</strong> + opcionales <strong class="text-slate-700 font-mono">P1, P2, P3, P4</strong> (Matriz v2) o bien <strong class="text-slate-700 font-mono">Reclamo, Fecha, Reclamante, Tercero, Localidad, Siniestro, Productor, Agencia, Gestor, Estado, Fecha de finalizacion</strong> (listado individual)</p>
               </div>
             </div>
             <div class="flex items-center gap-2">
@@ -3607,6 +3607,34 @@ url:e,reason:"blocked_domain_not_allowlisted"},b.parentOrigin);throw new DOMExce
       });
     }
 
+    function normalizeImportHeader(value) {
+      return String(value ?? '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-zA-Z0-9]/g, '')
+        .toUpperCase();
+    }
+
+    function resolveImportValue(row, keys) {
+      for (const key of keys) {
+        const matchedKey = Object.keys(row).find(actualKey => normalizeImportHeader(actualKey) === normalizeImportHeader(key));
+        if (matchedKey !== undefined) {
+          const value = row[matchedKey];
+          if (value !== undefined && value !== null && String(value).trim() !== '') {
+            return value;
+          }
+        }
+      }
+      return undefined;
+    }
+
+    function parseImportNumber(value, fallback = 0) {
+      if (value === undefined || value === null || value === '') return fallback;
+      const cleaned = String(value).trim().replace(/\./g, '').replace(/,/g, '.');
+      const parsed = Number.parseFloat(cleaned);
+      return Number.isFinite(parsed) ? Math.max(0, Math.round(parsed)) : fallback;
+    }
+
     function processExcelFile(file) {
       const reader = new FileReader();
       reader.onload = function(e) {
@@ -3623,41 +3651,92 @@ url:e,reason:"blocked_domain_not_allowlisted"},b.parentOrigin);throw new DOMExce
           }
 
           let matchedCount = 0;
+          let managerAssignments = 0;
           claimsData = {};
 
           jsonData.forEach(row => {
-            let agencyName = row['AGENCIA'] || row['Agencia'] || row['agencia'] || row['SEDE'] || row['Sede'] || row['NOMBRE'] || '';
-            let claimsValue = row['RECLAMOS'] || row['Reclamos'] || row['CANTIDAD'] || row['CASOS'] || 0;
-            let p1Val = parseInt(row['P1'] || row['p1'] || row['LESIONES'] || row['CRITICOS'] || 0, 10);
-            let p2Val = parseInt(row['P2'] || row['p2'] || row['ALTOS'] || 0, 10);
-            let p3Val = parseInt(row['P3'] || row['p3'] || row['MEDIOS'] || 0, 10);
-            let p4Val = parseInt(row['P4'] || row['p4'] || row['FRANQUICIAS'] || 0, 10);
+            const agencyName = resolveImportValue(row, ['AGENCIA', 'SEDE', 'SEDE / AGENCIA', 'AGENCIA OPERATIVA', 'NOMBRE', 'NOMBRE AGENCIA']) || '';
+            const managerName = resolveImportValue(row, ['GESTOR ASIGNADO', 'GESTOR', 'RESPONSABLE', 'RESPONSABLE ASIGNADO', 'ASIGNADO A', 'MANAGER', 'GESTORASIGNADO']);
+            const claimsValue = resolveImportValue(row, ['RECLAMOS', 'CLAIMS', 'CANTIDAD', 'CASOS', 'TOTAL', 'SINIESTROS']);
+            const individualRowValue = resolveImportValue(row, ['RECLAMO', 'SINIESTRO', 'NRO SINIESTRO', 'NRO RECLAMO', 'ID SINIESTRO', 'ID RECLAMO', 'NRORECLAMO']);
+            const p1Val = parseImportNumber(resolveImportValue(row, ['P1', 'p1', 'LESIONES', 'CRITICOS', 'PRIORIDAD 1']), 0);
+            const p2Val = parseImportNumber(resolveImportValue(row, ['P2', 'p2', 'ALTOS', 'PRIORIDAD 2']), 0);
+            const p3Val = parseImportNumber(resolveImportValue(row, ['P3', 'p3', 'MEDIOS', 'PRIORIDAD 3']), 0);
+            const p4Val = parseImportNumber(resolveImportValue(row, ['P4', 'p4', 'FRANQUICIAS', 'PRIORIDAD 4']), 0);
 
-            if (agencyName) {
-              const cleanName = String(agencyName).trim().toUpperCase();
-              const foundAgency = agenciesData.find(a => 
-                a.agency.toUpperCase() === cleanName || 
-                a.agency.toUpperCase().includes(cleanName) ||
-                cleanName.includes(a.agency.toUpperCase())
-              );
+            if (!agencyName) return;
 
-              if (foundAgency) {
-                const total = parseInt(claimsValue, 10) || 0;
-                // If priorities not specified in Excel, distribute according to typical weights
-                if (p1Val === 0 && p2Val === 0 && p3Val === 0 && p4Val === 0 && total > 0) {
-                  p1Val = Math.max(1, Math.round(total * 0.15));
-                  p2Val = Math.round(total * 0.25);
-                  p3Val = Math.round(total * 0.45);
-                  p4Val = Math.max(0, total - p1Val - p2Val - p3Val);
-                }
-                claimsData[foundAgency.id] = { total, p1: p1Val, p2: p2Val, p3: p3Val, p4: p4Val };
-                matchedCount++;
+            const cleanName = String(agencyName).trim().toUpperCase();
+            const foundAgency = agenciesData.find(a => 
+              a.agency.toUpperCase() === cleanName || 
+              a.agency.toUpperCase().includes(cleanName) ||
+              cleanName.includes(a.agency.toUpperCase())
+            );
+
+            if (!foundAgency) return;
+
+            let total = parseImportNumber(claimsValue, 0);
+            if (total === 0 && individualRowValue) {
+              total = 1;
+            }
+            if (total === 0 && (p1Val > 0 || p2Val > 0 || p3Val > 0 || p4Val > 0)) {
+              total = p1Val + p2Val + p3Val + p4Val;
+            }
+
+            if (total === 0 && !managerName && !individualRowValue) {
+              return;
+            }
+
+            const existing = claimsData[foundAgency.id] || { total: 0, p1: 0, p2: 0, p3: 0, p4: 0 };
+            const nextTotal = existing.total + total;
+
+            let nextP1 = existing.p1;
+            let nextP2 = existing.p2;
+            let nextP3 = existing.p3;
+            let nextP4 = existing.p4;
+
+            if (p1Val || p2Val || p3Val || p4Val) {
+              nextP1 = existing.p1 + p1Val;
+              nextP2 = existing.p2 + p2Val;
+              nextP3 = existing.p3 + p3Val;
+              nextP4 = existing.p4 + p4Val;
+            } else if (nextTotal > 0) {
+              nextP1 = existing.p1 + Math.max(1, Math.round(nextTotal * 0.15));
+              nextP2 = existing.p2 + Math.round(nextTotal * 0.25);
+              nextP3 = existing.p3 + Math.round(nextTotal * 0.45);
+              nextP4 = existing.p4 + Math.max(0, nextTotal - nextP1 - nextP2 - nextP3);
+            }
+
+            claimsData[foundAgency.id] = {
+              total: nextTotal,
+              p1: nextP1,
+              p2: nextP2,
+              p3: nextP3,
+              p4: nextP4
+            };
+
+            if (managerName) {
+              const normalizedManager = String(managerName).trim();
+              const matchedManager = foundAgency.people.find(person => {
+                const personName = String(person.name || '').trim();
+                const personKey = personName.toUpperCase();
+                const managerKey = normalizedManager.toUpperCase();
+                return personKey === managerKey || personKey.includes(managerKey) || managerKey.includes(personKey);
+              });
+
+              if (matchedManager) {
+                managerAssignments += total || 1;
               }
             }
+
+            matchedCount++;
           });
 
           renderClaimsAnalytics();
-          showToast(`Excel cargado con éxito: ${matchedCount} sedes reconocidas`);
+          const summary = managerAssignments > 0
+            ? `Excel cargado con éxito: ${matchedCount} filas reconocidas y ${managerAssignments} siniestros con gestor asignado`
+            : `Excel cargado con éxito: ${matchedCount} filas reconocidas`;
+          showToast(summary);
         } catch (err) {
           console.error(err);
           showToast('Error al procesar el archivo Excel.');
@@ -3674,10 +3753,12 @@ url:e,reason:"blocked_domain_not_allowlisted"},b.parentOrigin);throw new DOMExce
           const p2 = Math.round(total * 0.25);
           const p3 = Math.round(total * 0.45);
           const p4 = total - p1 - p2 - p3;
+          const gestor = a.people[0]?.name || 'GESTOR ASIGNADO';
           return {
             'AGENCIA': a.agency,
             'PROVINCIA': a.province,
             'RECLAMOS': total,
+            'GESTOR ASIGNADO': gestor,
             'P1': p1,
             'P2': p2,
             'P3': p3,
